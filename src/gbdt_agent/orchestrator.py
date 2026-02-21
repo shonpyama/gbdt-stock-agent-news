@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence
 
+import numpy as np
 import pandas as pd
 
 from .backtest import run_backtest
@@ -558,13 +559,26 @@ def run_pipeline(
             if "gbdt" not in ckpts:
                 raise RuntimeError("GBDT checkpoint missing")
             model = GBDTRegressor.load(ckpts["gbdt"])
+            tr_info = (metrics.get("training_info") or {}).get("gbdt")
+            selected_feature_cols = list((metrics.get("training_info") or {}).get("feature_cols") or feature_cols)
+            fill_values = (metrics.get("training_info") or {}).get("feature_fill_values") or {}
+            if isinstance(tr_info, dict):
+                selected_feature_cols = list((metrics.get("training_info") or {}).get("feature_cols") or selected_feature_cols)
+                fill_values = (metrics.get("training_info") or {}).get("feature_fill_values") or fill_values
 
             rows = []
             for split_name, dset in [("train", train_ds), ("val", val_ds), ("test", test_ds)]:
                 part = merged[merged["decision_date"].isin(dset)].copy()
-                X = part[feature_cols].to_numpy(dtype=float)
-                y = part[target_col].to_numpy(dtype=float)
-                keep = pd.notna(X).all(axis=1) & pd.notna(y)
+                xdf = part[selected_feature_cols].copy()
+                for c in selected_feature_cols:
+                    xdf[c] = pd.to_numeric(xdf[c], errors="coerce")
+                xdf = xdf.replace([np.inf, -np.inf], np.nan)
+                if fill_values:
+                    xdf = xdf.fillna(fill_values)
+                xdf = xdf.fillna(0.0)
+                X = xdf.to_numpy(dtype=float)
+                y = pd.to_numeric(part[target_col], errors="coerce").replace([np.inf, -np.inf], np.nan).to_numpy(dtype=float)
+                keep = np.isfinite(X).all(axis=1) & np.isfinite(y)
                 meta = part.loc[keep, ["decision_date", "symbol"] + [c for c in ["adv20_dollar", "vol_20d"] if c in part.columns]].copy()
                 X = X[keep]
                 y = y[keep]
