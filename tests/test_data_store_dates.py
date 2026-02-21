@@ -217,7 +217,15 @@ def test_update_data_skips_general_news_when_same_endpoint(tmp_path: Path) -> No
         def get_cash_flow(self, *args, **kwargs):
             return []
 
-        def get_stock_news(self, symbol: str, limit: int = 50):
+        def get_stock_news(
+            self,
+            symbol: str,
+            *,
+            start: str | None = None,
+            end: str | None = None,
+            limit: int = 50,
+            page: int | None = None,
+        ):
             return [
                 {
                     "symbol": symbol,
@@ -227,7 +235,7 @@ def test_update_data_skips_general_news_when_same_endpoint(tmp_path: Path) -> No
                 }
             ]
 
-        def get_general_news(self, limit: int = 100):
+        def get_general_news(self, *, start: str | None = None, end: str | None = None, limit: int = 100, page: int | None = None):
             self.general_news_calls += 1
             return [{"symbol": "GENERAL", "publishedDate": "2026-02-20 11:00:00", "title": "market", "url": "x"}]
 
@@ -238,3 +246,103 @@ def test_update_data_skips_general_news_when_same_endpoint(tmp_path: Path) -> No
     news = pd.read_parquet(paths.raw_dir / dataset_id / "news.parquet")
     assert len(news) == 1
     assert news.iloc[0]["symbol"] == "AAPL"
+
+
+def test_update_data_fetches_historical_news_pages(tmp_path: Path) -> None:
+    conf_dir = tmp_path / "conf"
+    conf_dir.mkdir(parents=True, exist_ok=True)
+    (conf_dir / "universe_custom.yaml").write_text(yaml.safe_dump({"symbols": ["AAPL"]}, sort_keys=False))
+
+    cfg = {
+        "universe": {"provider": "custom_list", "fallback_small50": {"enabled": False, "symbols": []}},
+        "data": {
+            "start_date": "2026-02-20",
+            "end_date": "2026-02-20",
+            "adjusted_flag": False,
+            "endpoints_version": ["prices_eod", "stock_news"],
+            "include_news": True,
+            "news_fetch": {
+                "stock_fetch_historical": True,
+                "stock_window_days": 30,
+                "stock_limit": 2,
+                "stock_max_pages": 3,
+                "stock_max_records_per_symbol": 20,
+            },
+        },
+        "fmp": {"endpoints": {"stock_news": "news/stock", "general_news": "news/stock"}},
+    }
+    paths = ProjectPaths.from_project_dir(tmp_path)
+    paths.ensure_base_dirs()
+
+    class DummyFMP:
+        def __init__(self) -> None:
+            self.news_pages: list[int] = []
+
+        def endpoint_for(self, endpoint_name: str) -> str:
+            return "news/stock" if endpoint_name in {"stock_news", "general_news"} else endpoint_name
+
+        def get_prices(self, symbol: str, start: str, end: str):
+            return [
+                {
+                    "date": "2026-02-20",
+                    "open": 10.0,
+                    "high": 11.0,
+                    "low": 9.5,
+                    "close": 10.5,
+                    "volume": 1000,
+                }
+            ]
+
+        def get_dividends(self, *args, **kwargs):
+            return []
+
+        def get_splits(self, *args, **kwargs):
+            return []
+
+        def get_earnings(self, *args, **kwargs):
+            return []
+
+        def get_earnings_surprises(self, *args, **kwargs):
+            return []
+
+        def get_income_statement(self, *args, **kwargs):
+            return []
+
+        def get_balance_sheet(self, *args, **kwargs):
+            return []
+
+        def get_cash_flow(self, *args, **kwargs):
+            return []
+
+        def get_stock_news(
+            self,
+            symbol: str,
+            *,
+            start: str | None = None,
+            end: str | None = None,
+            limit: int = 50,
+            page: int | None = None,
+        ):
+            p = int(page or 0)
+            self.news_pages.append(p)
+            if p == 0:
+                return [
+                    {"symbol": symbol, "publishedDate": "2026-02-20 10:00:00", "title": "a", "url": "u1"},
+                    {"symbol": symbol, "publishedDate": "2026-02-20 09:00:00", "title": "b", "url": "u2"},
+                ]
+            if p == 1:
+                return [{"symbol": symbol, "publishedDate": "2026-02-20 08:00:00", "title": "c", "url": "u3"}]
+            return []
+
+        def get_general_news(self, *, start: str | None = None, end: str | None = None, limit: int = 100, page: int | None = None):
+            return []
+
+    fmp = DummyFMP()
+    dataset_id, _, _ = update_data(cfg, paths, fmp, force=False)
+
+    # page=0 then page=1; page=2 should not be called because page=1 returned < limit.
+    assert fmp.news_pages == [0, 1]
+
+    news = pd.read_parquet(paths.raw_dir / dataset_id / "news.parquet")
+    assert len(news) == 3
+    assert sorted(news["url"].tolist()) == ["u1", "u2", "u3"]

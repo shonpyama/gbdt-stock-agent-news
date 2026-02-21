@@ -358,18 +358,47 @@ class FMPClient:
             endpoint_name="cash_flow",
         )
 
-    def get_stock_news(self, symbol: str, limit: int = 50) -> Any:
+    def get_stock_news(
+        self,
+        symbol: str,
+        *,
+        start: Optional[str] = None,
+        end: Optional[str] = None,
+        limit: int = 50,
+        page: Optional[int] = None,
+    ) -> Any:
         ep = self.endpoint_for("stock_news")
+        params: Dict[str, Any] = {"symbols": symbol, "limit": limit}
+        if start:
+            params["from"] = start
+        if end:
+            params["to"] = end
+        if page is not None:
+            params["page"] = int(page)
         return self.request(
             ep,
-            params={"symbols": symbol, "limit": limit},
+            params=params,
             endpoint_name="stock_news",
         )
 
-    def get_general_news(self, limit: int = 100) -> Any:
+    def get_general_news(
+        self,
+        *,
+        start: Optional[str] = None,
+        end: Optional[str] = None,
+        limit: int = 100,
+        page: Optional[int] = None,
+    ) -> Any:
         ep = self.endpoint_for("general_news")
+        params: Dict[str, Any] = {"limit": limit}
+        if start:
+            params["from"] = start
+        if end:
+            params["to"] = end
+        if page is not None:
+            params["page"] = int(page)
         return self.request(
             ep,
-            params={"limit": limit},
+            params=params,
             endpoint_name="general_news",
         )

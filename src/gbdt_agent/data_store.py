@@ -4,7 +4,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -50,6 +50,15 @@ def _parse_date(value: Any) -> Optional[date]:
     if ts is None or pd.isna(ts):
         return None
     return ts.date()
+
+
+def _iter_date_windows(start_dt: date, end_dt: date, *, window_days: int) -> Iterable[Tuple[date, date]]:
+    wd = max(1, int(window_days))
+    cur = start_dt
+    while cur <= end_dt:
+        nxt = min(end_dt, cur + timedelta(days=wd - 1))
+        yield cur, nxt
+        cur = nxt + timedelta(days=1)
 
 
 def dataset_id_from_spec(spec: Dict[str, Any]) -> str:
@@ -351,6 +360,10 @@ def compute_dataset_id(
     fcfg = cfg.get("fmp", {}) or {}
     ep_cfg = (fcfg.get("endpoints") or {}) if isinstance(fcfg.get("endpoints"), dict) else {}
     include_news = bool(dcfg.get("include_news", False))
+    ncfg = dcfg.get("news_fetch", {}) if isinstance(dcfg.get("news_fetch", {}), dict) else {}
+    default_hist = len(list(symbols)) <= 50
+    default_stock_limit = 200 if default_hist else 50
+    default_stock_max_pages = 5 if default_hist else 1
     spec = {
         "universe_name": str(ucfg.get("name", "sp500_pit")),
         "symbols_hash": symbols_hash(list(symbols)),
@@ -365,7 +378,12 @@ def compute_dataset_id(
             "stock_endpoint": str(ep_cfg.get("stock_news", "")),
             "general_endpoint": str(ep_cfg.get("general_news", "")),
             "stock_symbol_param": "symbols",
-            "version": 2,
+            "stock_fetch_historical": bool(ncfg.get("stock_fetch_historical", default_hist)),
+            "stock_window_days": int(ncfg.get("stock_window_days", 31)),
+            "stock_limit": int(ncfg.get("stock_limit", default_stock_limit)),
+            "stock_max_pages": int(ncfg.get("stock_max_pages", default_stock_max_pages)),
+            "general_limit": int(ncfg.get("general_limit", 200)),
+            "version": 3,
         }
         if include_news
         else None,
@@ -556,32 +574,90 @@ def update_data(
     include_news = bool(dcfg.get("include_news", False))
     if include_news:
         try:
+            ncfg = dcfg.get("news_fetch", {}) if isinstance(dcfg.get("news_fetch", {}), dict) else {}
+            default_hist = len(symbols) <= 50
+            default_stock_limit = 200 if default_hist else 50
+            default_stock_max_pages = 5 if default_hist else 1
+            stock_fetch_historical = bool(ncfg.get("stock_fetch_historical", default_hist))
+            stock_window_days = max(1, int(ncfg.get("stock_window_days", 31)))
+            stock_limit = max(1, int(ncfg.get("stock_limit", default_stock_limit)))
+            stock_max_pages = max(1, int(ncfg.get("stock_max_pages", default_stock_max_pages)))
+            stock_max_records_per_symbol = max(1, int(ncfg.get("stock_max_records_per_symbol", 4000)))
+            general_limit = max(1, int(ncfg.get("general_limit", 200)))
+
+            start_dt = pd.to_datetime(start).date()
+            end_dt = pd.to_datetime(end).date()
+
             existing = _read_parquet(news_path) if news_path.exists() and not force else pd.DataFrame()
             rows: List[pd.DataFrame] = []
             for sym in tqdm(symbols, desc="fetch_news"):
                 try:
-                    payload = fmp.get_stock_news(sym, limit=50)
-                    if not isinstance(payload, list) or not payload:
-                        continue
-                    df = pd.DataFrame(payload)
-                    if df.empty:
-                        continue
-                    if "symbol" in df.columns:
-                        syms = df["symbol"].astype(str).str.upper()
-                        matched = syms == sym
-                        if not matched.any():
-                            logger.warning(f"stock_news_symbol_mismatch requested={sym}")
-                            continue
-                        df = df.loc[matched].copy()
+                    sym_pages: List[pd.DataFrame] = []
+
+                    if stock_fetch_historical:
+                        for win_start, win_end in _iter_date_windows(start_dt, end_dt, window_days=stock_window_days):
+                            for page in range(stock_max_pages):
+                                payload = fmp.get_stock_news(
+                                    sym,
+                                    start=win_start.isoformat(),
+                                    end=win_end.isoformat(),
+                                    limit=stock_limit,
+                                    page=page,
+                                )
+                                if not isinstance(payload, list) or not payload:
+                                    break
+                                df = pd.DataFrame(payload)
+                                if df.empty:
+                                    break
+                                if "symbol" in df.columns:
+                                    syms = df["symbol"].astype(str).str.upper()
+                                    matched = syms == sym
+                                    if not matched.any():
+                                        logger.warning(f"stock_news_symbol_mismatch requested={sym}")
+                                        break
+                                    df = df.loc[matched].copy()
+                                else:
+                                    df["symbol"] = sym
+                                df["symbol"] = df["symbol"].astype(str).str.upper()
+                                sym_pages.append(df)
+
+                                total_rows = sum(len(x) for x in sym_pages)
+                                if total_rows >= stock_max_records_per_symbol:
+                                    logger.info(
+                                        f"stock_news_cap_reached symbol={sym} max_records={stock_max_records_per_symbol}"
+                                    )
+                                    break
+                                if len(payload) < stock_limit:
+                                    break
+                            if sum(len(x) for x in sym_pages) >= stock_max_records_per_symbol:
+                                break
                     else:
-                        df["symbol"] = sym
-                    df["symbol"] = df["symbol"].astype(str).str.upper()
-                    rows.append(df)
+                        payload = fmp.get_stock_news(sym, limit=stock_limit)
+                        if isinstance(payload, list) and payload:
+                            df = pd.DataFrame(payload)
+                            if not df.empty:
+                                if "symbol" in df.columns:
+                                    syms = df["symbol"].astype(str).str.upper()
+                                    matched = syms == sym
+                                    if matched.any():
+                                        df = df.loc[matched].copy()
+                                    else:
+                                        logger.warning(f"stock_news_symbol_mismatch requested={sym}")
+                                        df = pd.DataFrame()
+                                else:
+                                    df["symbol"] = sym
+                                if not df.empty:
+                                    df["symbol"] = df["symbol"].astype(str).str.upper()
+                                    sym_pages.append(df)
+
+                    if sym_pages:
+                        sdf = pd.concat(sym_pages, ignore_index=True)
+                        rows.append(sdf)
                 except Exception as e:
                     logger.warning(f"stock_news_fetch_failed symbol={sym}: {type(e).__name__}: {e}")
             try:
                 if fmp.endpoint_for("general_news") != fmp.endpoint_for("stock_news"):
-                    gnews = fmp.get_general_news(limit=200)
+                    gnews = fmp.get_general_news(limit=general_limit)
                     if isinstance(gnews, list) and gnews:
                         gdf = pd.DataFrame(gnews)
                         if not gdf.empty:

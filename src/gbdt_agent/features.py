@@ -158,7 +158,12 @@ def _prepare_news_features(
         "symbol",
         "news_count_1d",
         "news_sentiment_1d",
+        "news_sentiment_sum_1d",
+        "news_pos_ratio_1d",
+        "news_neg_ratio_1d",
         "news_title_len_mean_1d",
+        "news_body_len_mean_1d",
+        "news_urgency_mean_1d",
         "news_market_count_1d",
     ]
     if news.empty:
@@ -190,10 +195,67 @@ def _prepare_news_features(
         title = df["title"].astype(str).str.lower()
     else:
         title = pd.Series([""] * len(df), index=df.index, dtype="object")
+    if "text" in df.columns:
+        body = df["text"].astype(str).str.lower()
+    else:
+        body = pd.Series([""] * len(df), index=df.index, dtype="object")
     df["news_title_len"] = title.str.len().astype(float)
+    df["news_body_len"] = body.str.len().astype(float)
 
-    pos_words = {"beat", "beats", "growth", "upgrade", "surge", "record", "strong", "bullish", "outperform", "profit"}
-    neg_words = {"miss", "misses", "downgrade", "drop", "lawsuit", "weak", "bearish", "loss", "fraud", "cut"}
+    pos_words = {
+        "beat",
+        "beats",
+        "growth",
+        "upgrade",
+        "surge",
+        "record",
+        "strong",
+        "bullish",
+        "outperform",
+        "profit",
+        "profits",
+        "raised",
+        "raise",
+        "guidance",
+        "buyback",
+        "rebound",
+        "expands",
+        "momentum",
+        "optimistic",
+    }
+    neg_words = {
+        "miss",
+        "misses",
+        "downgrade",
+        "drop",
+        "lawsuit",
+        "weak",
+        "bearish",
+        "loss",
+        "fraud",
+        "cut",
+        "cuts",
+        "slump",
+        "warning",
+        "probe",
+        "investigation",
+        "recall",
+        "layoffs",
+        "bankruptcy",
+        "risk",
+    }
+    urgency_words = {
+        "downgrade",
+        "upgrade",
+        "lawsuit",
+        "fraud",
+        "bankruptcy",
+        "guidance",
+        "beat",
+        "miss",
+        "probe",
+        "investigation",
+    }
 
     def _sentiment_score(text: str) -> float:
         toks = [t.strip(".,:;!?()[]{}\"'") for t in str(text).split()]
@@ -203,7 +265,18 @@ def _prepare_news_features(
         neg = sum(1 for t in toks if t in neg_words)
         return float(pos - neg) / float(len(toks))
 
-    df["news_sentiment"] = title.map(_sentiment_score)
+    def _urgency_score(text: str) -> float:
+        toks = [t.strip(".,:;!?()[]{}\"'") for t in str(text).split()]
+        if not toks:
+            return 0.0
+        hits = sum(1 for t in toks if t in urgency_words)
+        return float(hits) / float(len(toks))
+
+    content = (title + " " + body).str.slice(0, 4000)
+    df["news_sentiment"] = content.map(_sentiment_score)
+    df["news_urgency"] = content.map(_urgency_score)
+    df["news_pos_flag"] = (df["news_sentiment"] > 0.0).astype(float)
+    df["news_neg_flag"] = (df["news_sentiment"] < 0.0).astype(float)
 
     market = df.groupby("decision_date", as_index=False).size().rename(columns={"size": "news_market_count_1d"})
 
@@ -213,7 +286,12 @@ def _prepare_news_features(
         out["symbol"] = "GENERAL"
         out["news_count_1d"] = 0.0
         out["news_sentiment_1d"] = 0.0
+        out["news_sentiment_sum_1d"] = 0.0
+        out["news_pos_ratio_1d"] = 0.0
+        out["news_neg_ratio_1d"] = 0.0
         out["news_title_len_mean_1d"] = 0.0
+        out["news_body_len_mean_1d"] = 0.0
+        out["news_urgency_mean_1d"] = 0.0
         return out[cols]
 
     agg = (
@@ -221,7 +299,12 @@ def _prepare_news_features(
         .agg(
             news_count_1d=("symbol", "size"),
             news_sentiment_1d=("news_sentiment", "mean"),
+            news_sentiment_sum_1d=("news_sentiment", "sum"),
+            news_pos_ratio_1d=("news_pos_flag", "mean"),
+            news_neg_ratio_1d=("news_neg_flag", "mean"),
             news_title_len_mean_1d=("news_title_len", "mean"),
+            news_body_len_mean_1d=("news_body_len", "mean"),
+            news_urgency_mean_1d=("news_urgency", "mean"),
         )
         .merge(market, on="decision_date", how="left")
     )
@@ -269,10 +352,55 @@ def build_feature_store(
         if news is not None and not news.empty:
             n_feats = _prepare_news_features(news, event_safe_shift_days=event_safe_shift_days)
             feats = feats.merge(n_feats, on=["decision_date", "symbol"], how="left")
-        for c in ["news_count_1d", "news_sentiment_1d", "news_title_len_mean_1d", "news_market_count_1d"]:
+        news_base_cols = [
+            "news_count_1d",
+            "news_sentiment_1d",
+            "news_sentiment_sum_1d",
+            "news_pos_ratio_1d",
+            "news_neg_ratio_1d",
+            "news_title_len_mean_1d",
+            "news_body_len_mean_1d",
+            "news_urgency_mean_1d",
+            "news_market_count_1d",
+        ]
+        for c in news_base_cols:
             if c not in feats.columns:
                 feats[c] = 0.0
             feats[c] = pd.to_numeric(feats[c], errors="coerce").fillna(0.0)
+
+        feats = feats.sort_values(["symbol", "decision_date"]).reset_index(drop=True)
+        g = feats.groupby("symbol", sort=False)
+
+        cnt_20_mean_prev = (
+            g["news_count_1d"].rolling(20, min_periods=5).mean().shift(1).reset_index(level=0, drop=True)
+        )
+        cnt_20_std_prev = (
+            g["news_count_1d"].rolling(20, min_periods=5).std().shift(1).reset_index(level=0, drop=True)
+        )
+
+        feats["news_count_5d"] = g["news_count_1d"].rolling(5, min_periods=1).sum().reset_index(level=0, drop=True)
+        feats["news_count_20d"] = g["news_count_1d"].rolling(20, min_periods=1).sum().reset_index(level=0, drop=True)
+        feats["news_count_z20"] = (feats["news_count_1d"] - cnt_20_mean_prev) / (cnt_20_std_prev + 1e-6)
+        feats["news_buzz_ratio_20d"] = feats["news_count_1d"] / (cnt_20_mean_prev + 1.0)
+
+        feats["news_sentiment_5d_mean"] = (
+            g["news_sentiment_1d"].rolling(5, min_periods=1).mean().reset_index(level=0, drop=True)
+        )
+        feats["news_sentiment_20d_mean"] = (
+            g["news_sentiment_1d"].rolling(20, min_periods=1).mean().reset_index(level=0, drop=True)
+        )
+        feats["news_sentiment_mom_5_20"] = feats["news_sentiment_5d_mean"] - feats["news_sentiment_20d_mean"]
+        feats["news_sentiment_sum_5d"] = (
+            g["news_sentiment_sum_1d"].rolling(5, min_periods=1).sum().reset_index(level=0, drop=True)
+        )
+
+        feats["news_market_share_1d"] = feats["news_count_1d"] / feats["news_market_count_1d"].clip(lower=1.0)
+        feats["news_market_share_20d"] = (
+            g["news_market_share_1d"].rolling(20, min_periods=1).mean().reset_index(level=0, drop=True)
+        )
+
+        news_all_cols = [c for c in feats.columns if c.startswith("news_")]
+        feats[news_all_cols] = feats[news_all_cols].replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
     # Build spec + IDs
     feature_cols = [c for c in feats.columns if c not in {"decision_date", "symbol", "feature_available_date"}]
