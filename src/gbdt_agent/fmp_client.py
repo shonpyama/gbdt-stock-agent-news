@@ -362,7 +362,7 @@ class FMPClient:
         ep = self.endpoint_for("stock_news")
         return self.request(
             ep,
-            params={"symbol": symbol, "limit": limit},
+            params={"symbols": symbol, "limit": limit},
             endpoint_name="stock_news",
         )
 
