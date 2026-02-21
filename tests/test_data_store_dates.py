@@ -124,3 +124,117 @@ def test_update_data_skips_price_fetch_when_no_new_business_day(tmp_path: Path) 
     _, _, last_data_date = update_data(cfg, paths, fmp, force=False)
     assert fmp.price_calls == 0
     assert last_data_date == "2026-02-20"
+
+
+def test_compute_dataset_id_changes_when_news_contract_changes() -> None:
+    base = {
+        "run": {"timezone_assumption": "US/Eastern"},
+        "universe": {"name": "custom"},
+        "data": {
+            "start_date": "2026-01-01",
+            "end_date": "2026-02-01",
+            "adjusted_flag": False,
+            "endpoints_version": ["prices_eod"],
+            "include_news": False,
+        },
+        "fmp": {"endpoints": {"stock_news": "news/stock", "general_news": "news/stock"}},
+    }
+    with_news = {
+        **base,
+        "data": {**base["data"], "include_news": True},
+    }
+    with_news_alt = {
+        **with_news,
+        "fmp": {"endpoints": {"stock_news": "news/stock-v2", "general_news": "news/stock"}},
+    }
+
+    id_base = compute_dataset_id(base, ["AAPL"], effective_end_date="2026-02-01")
+    id_news = compute_dataset_id(with_news, ["AAPL"], effective_end_date="2026-02-01")
+    id_news_alt = compute_dataset_id(with_news_alt, ["AAPL"], effective_end_date="2026-02-01")
+
+    assert id_base != id_news
+    assert id_news != id_news_alt
+
+
+def test_update_data_skips_general_news_when_same_endpoint(tmp_path: Path) -> None:
+    conf_dir = tmp_path / "conf"
+    conf_dir.mkdir(parents=True, exist_ok=True)
+    (conf_dir / "universe_custom.yaml").write_text(yaml.safe_dump({"symbols": ["AAPL"]}, sort_keys=False))
+
+    cfg = {
+        "universe": {"provider": "custom_list", "fallback_small50": {"enabled": False, "symbols": []}},
+        "data": {
+            "start_date": "2026-02-20",
+            "end_date": "2026-02-20",
+            "adjusted_flag": False,
+            "endpoints_version": ["prices_eod", "stock_news", "general_news"],
+            "include_news": True,
+        },
+        "fmp": {"endpoints": {"stock_news": "news/stock", "general_news": "news/stock"}},
+    }
+    paths = ProjectPaths.from_project_dir(tmp_path)
+    paths.ensure_base_dirs()
+
+    class DummyFMP:
+        def __init__(self) -> None:
+            self.general_news_calls = 0
+
+        def endpoint_for(self, endpoint_name: str) -> str:
+            if endpoint_name in {"stock_news", "general_news"}:
+                return "news/stock"
+            return endpoint_name
+
+        def get_prices(self, symbol: str, start: str, end: str):
+            return [
+                {
+                    "date": "2026-02-20",
+                    "open": 10.0,
+                    "high": 11.0,
+                    "low": 9.5,
+                    "close": 10.5,
+                    "volume": 1000,
+                }
+            ]
+
+        def get_dividends(self, *args, **kwargs):
+            return []
+
+        def get_splits(self, *args, **kwargs):
+            return []
+
+        def get_earnings(self, *args, **kwargs):
+            return []
+
+        def get_earnings_surprises(self, *args, **kwargs):
+            return []
+
+        def get_income_statement(self, *args, **kwargs):
+            return []
+
+        def get_balance_sheet(self, *args, **kwargs):
+            return []
+
+        def get_cash_flow(self, *args, **kwargs):
+            return []
+
+        def get_stock_news(self, symbol: str, limit: int = 50):
+            return [
+                {
+                    "symbol": symbol,
+                    "publishedDate": "2026-02-20 10:00:00",
+                    "title": f"{symbol} news",
+                    "url": f"https://example.com/{symbol}",
+                }
+            ]
+
+        def get_general_news(self, limit: int = 100):
+            self.general_news_calls += 1
+            return [{"symbol": "GENERAL", "publishedDate": "2026-02-20 11:00:00", "title": "market", "url": "x"}]
+
+    fmp = DummyFMP()
+    dataset_id, _, _ = update_data(cfg, paths, fmp, force=False)
+    assert fmp.general_news_calls == 0
+
+    news = pd.read_parquet(paths.raw_dir / dataset_id / "news.parquet")
+    assert len(news) == 1
+    assert news.iloc[0]["symbol"] == "AAPL"

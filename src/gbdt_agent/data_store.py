@@ -348,6 +348,9 @@ def compute_dataset_id(
 ) -> str:
     dcfg = cfg.get("data", {}) or {}
     ucfg = cfg.get("universe", {}) or {}
+    fcfg = cfg.get("fmp", {}) or {}
+    ep_cfg = (fcfg.get("endpoints") or {}) if isinstance(fcfg.get("endpoints"), dict) else {}
+    include_news = bool(dcfg.get("include_news", False))
     spec = {
         "universe_name": str(ucfg.get("name", "sp500_pit")),
         "symbols_hash": symbols_hash(list(symbols)),
@@ -356,6 +359,16 @@ def compute_dataset_id(
         "adjusted_flag": bool(dcfg.get("adjusted_flag", True)),
         "endpoints_version": list(dcfg.get("endpoints_version", [])),
         "timezone_assumption": str(cfg.get("run", {}).get("timezone_assumption", "")),
+        "include_news": include_news,
+        # Keep dataset_id sensitive to endpoint/param contract changes for news.
+        "news_fetch_contract": {
+            "stock_endpoint": str(ep_cfg.get("stock_news", "")),
+            "general_endpoint": str(ep_cfg.get("general_news", "")),
+            "stock_symbol_param": "symbols",
+            "version": 2,
+        }
+        if include_news
+        else None,
     }
     return dataset_id_from_spec(spec)
 
@@ -553,24 +566,39 @@ def update_data(
                     df = pd.DataFrame(payload)
                     if df.empty:
                         continue
-                    if "symbol" not in df.columns:
+                    if "symbol" in df.columns:
+                        syms = df["symbol"].astype(str).str.upper()
+                        matched = syms == sym
+                        if not matched.any():
+                            logger.warning(f"stock_news_symbol_mismatch requested={sym}")
+                            continue
+                        df = df.loc[matched].copy()
+                    else:
                         df["symbol"] = sym
+                    df["symbol"] = df["symbol"].astype(str).str.upper()
                     rows.append(df)
                 except Exception as e:
                     logger.warning(f"stock_news_fetch_failed symbol={sym}: {type(e).__name__}: {e}")
             try:
-                gnews = fmp.get_general_news(limit=200)
-                if isinstance(gnews, list) and gnews:
-                    gdf = pd.DataFrame(gnews)
-                    if not gdf.empty:
-                        if "symbol" not in gdf.columns:
-                            gdf["symbol"] = "GENERAL"
-                        rows.append(gdf)
+                if fmp.endpoint_for("general_news") != fmp.endpoint_for("stock_news"):
+                    gnews = fmp.get_general_news(limit=200)
+                    if isinstance(gnews, list) and gnews:
+                        gdf = pd.DataFrame(gnews)
+                        if not gdf.empty:
+                            if "symbol" not in gdf.columns:
+                                gdf["symbol"] = "GENERAL"
+                            gdf["symbol"] = gdf["symbol"].astype(str).str.upper()
+                            rows.append(gdf)
+                else:
+                    logger.info("skip_general_news_fetch duplicate_endpoint")
             except Exception as e:
                 logger.warning(f"general_news_fetch_failed: {type(e).__name__}: {e}")
             new = pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
             all_df = pd.concat([existing, new], ignore_index=True) if (not existing.empty and not new.empty) else (existing if not existing.empty else new)
             if not all_df.empty:
+                dedupe_keys = [k for k in ["symbol", "publishedDate", "title", "url"] if k in all_df.columns]
+                if dedupe_keys:
+                    all_df = all_df.drop_duplicates(subset=dedupe_keys, keep="first").reset_index(drop=True)
                 _write_parquet(all_df, news_path)
         except Exception as e:
             logger.warning(f"news_fetch_failed: {type(e).__name__}: {e}")

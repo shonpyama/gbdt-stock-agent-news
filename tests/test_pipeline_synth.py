@@ -189,9 +189,11 @@ def test_pipeline_fails_on_deliberate_leak(monkeypatch, tmp_path: Path) -> None:
         prices,
         universe_membership,
         earnings,
+        news=None,
         adjusted_flag,
         lookbacks,
         event_safe_shift_days,
+        include_news=False,
         out_dir,
     ):
         px = prices.copy()
