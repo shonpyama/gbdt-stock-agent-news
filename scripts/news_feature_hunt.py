@@ -77,7 +77,11 @@ def main() -> int:
 
     candidates: List[Dict[str, Any]] = []
     for i in range(args.trials):
-        include_news = bool(rng.random() < 0.75)
+        # Keep non-news exploration substantial so we continuously search broad alpha.
+        include_news = bool(rng.random() < 0.55)
+        lr = rng.choice([0.03, 0.05, 0.08])
+        num_leaves = rng.choice([15, 31, 63])
+        n_estimators = rng.choice([200, 300, 500])
         candidates.append(
             {
                 "name": f"auto_{i+1:02d}",
@@ -89,6 +93,9 @@ def main() -> int:
                 "stock_window_days": rng.choice([14, 21, 31]),
                 "stock_limit": rng.choice([100, 200]),
                 "stock_max_pages": rng.choice([3, 5]),
+                "learning_rate": lr,
+                "num_leaves": num_leaves,
+                "n_estimators": n_estimators,
             }
         )
     # Always include one clean baseline.
@@ -103,6 +110,9 @@ def main() -> int:
             "stock_window_days": 31,
             "stock_limit": 200,
             "stock_max_pages": 5,
+            "learning_rate": 0.05,
+            "num_leaves": 31,
+            "n_estimators": 300,
         }
     )
 
@@ -124,6 +134,10 @@ def main() -> int:
         cfg["split"]["embargo"] = 1
         cfg["validation"]["thresholds"]["min_obs_per_symbol"] = 40
         cfg.setdefault("models", {}).setdefault("gbdt", {})["min_finite_ratio"] = float(c["min_finite_ratio"])
+        gcfg = cfg.setdefault("models", {}).setdefault("gbdt", {}).setdefault("params", {})
+        gcfg["learning_rate"] = float(c["learning_rate"])
+        gcfg["num_leaves"] = int(c["num_leaves"])
+        gcfg["n_estimators"] = int(c["n_estimators"])
 
         conf_path = conf_dir / f"{ts}_{idx:02d}_{c['name']}.yaml"
         conf_path.write_text(yaml.safe_dump(cfg, sort_keys=False))
@@ -136,6 +150,9 @@ def main() -> int:
             "event_shift": c["event_shift"],
             "horizon": c["horizon"],
             "min_finite_ratio": c["min_finite_ratio"],
+            "learning_rate": c["learning_rate"],
+            "num_leaves": c["num_leaves"],
+            "n_estimators": c["n_estimators"],
             "ok": False,
         }
         try:
