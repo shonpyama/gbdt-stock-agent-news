@@ -11,8 +11,8 @@ universe:
     enabled: false
     symbols: []
 data:
-  start_date: "2024-01-01"
-  end_date: "2024-09-30"
+  start_date: "2025-10-01"
+  end_date: "2026-02-20"
   adjusted_flag: false
   endpoints_version:
     - "prices_eod"
@@ -40,7 +40,7 @@ validation:
     missing_ratio_max: 0.2
     anomaly_row_ratio_max: 0.2
     duplicates_ratio_max: 0.0
-    min_obs_per_symbol: 80
+    min_obs_per_symbol: 60
     min_symbols_after_filter: 5
     adjclose_missing_ratio_max: 0.2
     price_jump_threshold: 0.5

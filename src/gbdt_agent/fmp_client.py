@@ -33,8 +33,8 @@ DEFAULT_ENDPOINTS = {
     "income_statement": "income-statement",
     "balance_sheet": "balance-sheet-statement",
     "cash_flow": "cash-flow-statement",
-    "stock_news": "stock-news",
-    "general_news": "general-news",
+    "stock_news": "news/stock",
+    "general_news": "news/stock",
 }
 
 

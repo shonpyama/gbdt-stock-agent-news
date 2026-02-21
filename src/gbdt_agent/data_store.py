@@ -546,14 +546,18 @@ def update_data(
             existing = _read_parquet(news_path) if news_path.exists() and not force else pd.DataFrame()
             rows: List[pd.DataFrame] = []
             for sym in tqdm(symbols, desc="fetch_news"):
-                payload = fmp.get_stock_news(sym, limit=50)
-                if not isinstance(payload, list) or not payload:
-                    continue
-                df = pd.DataFrame(payload)
-                if df.empty:
-                    continue
-                df["symbol"] = sym
-                rows.append(df)
+                try:
+                    payload = fmp.get_stock_news(sym, limit=50)
+                    if not isinstance(payload, list) or not payload:
+                        continue
+                    df = pd.DataFrame(payload)
+                    if df.empty:
+                        continue
+                    if "symbol" not in df.columns:
+                        df["symbol"] = sym
+                    rows.append(df)
+                except Exception as e:
+                    logger.warning(f"stock_news_fetch_failed symbol={sym}: {type(e).__name__}: {e}")
             try:
                 gnews = fmp.get_general_news(limit=200)
                 if isinstance(gnews, list) and gnews:

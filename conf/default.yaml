@@ -48,8 +48,8 @@ fmp:
     income_statement: "income-statement"
     balance_sheet: "balance-sheet-statement"
     cash_flow: "cash-flow-statement"
-    stock_news: "stock-news"
-    general_news: "general-news"
+    stock_news: "news/stock"
+    general_news: "news/stock"
   rate_limit:
     max_calls_per_minute: 300
   retry:
